@@ -1,0 +1,6 @@
+{
+  "name": "Net Worth Tracker",
+  "description": "A private offline-first net worth and portfolio tracking application, supporting stocks, Polish government bonds, cash, mutual funds, peer-to-peer device syncing, and live market quotes.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
