@@ -219,42 +219,77 @@ export default function App() {
       // Fetch latest FX rates from NBP first
       await fetchRates();
 
-      const response = await fetch("/api/quotes", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          tickers: portfolio.stocks.map(s => ({
-            symbol: s.symbol,
-            exchange: s.exchange,
-            currentPrice: s.currentPrice
-          }))
-        }),
+      // Loop through all saved stock tickers, fetching current prices in parallel
+      const updatePromises = portfolio.stocks.map(async (stock) => {
+        try {
+          // Try our parametric ticker endpoint
+          const response = await fetch(`/api/stock/${stock.symbol}`);
+          if (response.ok) {
+            const data = await response.json();
+            if (data && data.currentPrice !== null && data.currentPrice !== undefined) {
+              return {
+                symbol: stock.symbol,
+                exchange: stock.exchange,
+                currentPrice: data.currentPrice,
+                name: data.name || stock.name
+              };
+            }
+          }
+
+          // Fallback to the general bulk proxy endpoint if needed or for WSE GPW assets
+          const altResponse = await fetch("/api/quotes", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              tickers: [{ symbol: stock.symbol, exchange: stock.exchange, currentPrice: stock.currentPrice }]
+            }),
+          });
+          if (altResponse.ok) {
+            const altData = await altResponse.json();
+            if (altData && altData.updated && altData.updated.length > 0) {
+              const resObj = altData.updated[0];
+              return {
+                symbol: stock.symbol,
+                exchange: stock.exchange,
+                currentPrice: resObj.currentPrice,
+                name: resObj.name || stock.name
+              };
+            }
+          }
+        } catch (e) {
+          console.warn(`Parallel fetch failed for ${stock.symbol}:`, e);
+        }
+        return {
+          symbol: stock.symbol,
+          exchange: stock.exchange,
+          currentPrice: stock.currentPrice,
+          name: stock.name
+        };
       });
 
-      if (response.ok) {
-        const data = await response.json();
-        if (data && data.updated) {
-          const updatedStocks = portfolio.stocks.map(currentStock => {
-            const foundUpdate = data.updated.find(
-              (u: any) => u.symbol === currentStock.symbol && u.exchange === currentStock.exchange
-            );
-            if (foundUpdate) {
-              return { ...currentStock, currentPrice: foundUpdate.currentPrice };
-            }
-            return currentStock;
-          });
+      const updatedResults = await Promise.all(updatePromises);
 
-          const withUpdated = {
-            ...portfolio,
-            stocks: updatedStocks,
-            lastUpdate: new Date().toISOString()
+      const updatedStocks = portfolio.stocks.map(currentStock => {
+        const found = updatedResults.find(
+          r => r.symbol === currentStock.symbol && r.exchange === currentStock.exchange
+        );
+        if (found) {
+          return {
+            ...currentStock,
+            currentPrice: found.currentPrice,
+            name: found.name || currentStock.name,
           };
-          savePortfolio(withUpdated);
-          setQuoteSuccessMsg("Ceny akcji NYSE (Yahoo) i GPW (Stooq) zostały pomyślnie uaktualnione!");
         }
-      } else {
-        throw new Error("Wycena giełdowa zwróciła nieprawidłowy kod.");
-      }
+        return currentStock;
+      });
+
+      const withUpdated = {
+        ...portfolio,
+        stocks: updatedStocks,
+        lastUpdate: new Date().toISOString()
+      };
+      savePortfolio(withUpdated);
+      setQuoteSuccessMsg("Wszystkie walory zaktualizowane równolegle na żywo o " + new Date().toLocaleTimeString() + "!");
     } catch (err: any) {
       console.error(err);
       setQuoteSuccessMsg("Wykorzystano bezpieczną uśrednioną stawkę giełdową offline z rezerwy.");
@@ -263,6 +298,22 @@ export default function App() {
       setTimeout(() => setQuoteSuccessMsg(""), 6000);
     }
   };
+
+  // Avoid stale closures in our 5-minute interval auto-refresh timer
+  const latestRefreshRef = React.useRef(handleRefreshMarketQuotes);
+  useEffect(() => {
+    latestRefreshRef.current = handleRefreshMarketQuotes;
+  }, [handleRefreshMarketQuotes]);
+
+  useEffect(() => {
+    // 5-minute interval timer for automatic parallel prices synchronization
+    const intervalId = setInterval(() => {
+      console.log("5-minute background auto-refresh is active...");
+      latestRefreshRef.current();
+    }, 5 * 60 * 1000);
+
+    return () => clearInterval(intervalId);
+  }, []);
 
   const triggerBackgroundQuotesUpdate = async (stocksList: StockAsset[]) => {
     if (!stocksList || stocksList.length === 0) return;
@@ -316,35 +367,47 @@ export default function App() {
     setFetchingStockPrice(true);
     setFetchStockError("");
 
-    const exchange = assetType === AssetType.STOCK_NYSE ? "NYSE" : "WSE";
-
     try {
-      const response = await fetch("/api/quotes", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          tickers: [{ symbol: cleanSymbol, exchange }]
-        }),
-      });
+      // Fetch utilizing our newly created Parametric Route
+      const response = await fetch(`/api/stock/${cleanSymbol}`);
 
       if (response.ok) {
         const data = await response.json();
-        if (data && data.updated && data.updated.length > 0) {
-          const result = data.updated[0];
-          setStockPriceCurrent(result.currentPrice.toString());
+        if (data && data.currentPrice !== null && data.currentPrice !== undefined) {
+          setStockPriceCurrent(data.currentPrice.toString());
           
-          // Auto-populate the buy price with the current price if the buy price is empty/unset
-          setStockPriceBuy(prev => prev.trim() === "" ? result.currentPrice.toString() : prev);
+          // Auto-populate the buy price with currentPrice if empty/unset
+          setStockPriceBuy(prev => prev.trim() === "" ? data.currentPrice.toString() : prev);
           
-          if (result.name) {
-            setStockName(result.name);
+          if (data.name) {
+            setStockName(data.name);
           } else {
             setStockName(cleanSymbol);
           }
         } else {
-          setFetchStockError("Nie odnaleziono waloru.");
+          setFetchStockError("Nie odnaleziono waloru na Yahoo Finance.");
         }
       } else {
+        // If Yahoo route fails (e.g. for a Polish GPW ticker listed on Stooq but not on Yahoo)
+        // Fall back to general /api/quotes endpoint
+        const exchange = assetType === AssetType.STOCK_NYSE ? "NYSE" : "WSE";
+        const altResponse = await fetch("/api/quotes", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            tickers: [{ symbol: cleanSymbol, exchange }]
+          }),
+        });
+        if (altResponse.ok) {
+          const altData = await altResponse.json();
+          if (altData && altData.updated && altData.updated.length > 0) {
+            const result = altData.updated[0];
+            setStockPriceCurrent(result.currentPrice.toString());
+            setStockPriceBuy(prev => prev.trim() === "" ? result.currentPrice.toString() : prev);
+            setStockName(result.name || cleanSymbol);
+            return;
+          }
+        }
         setFetchStockError("Błąd pobierania wyceny.");
       }
     } catch (err) {
@@ -1028,8 +1091,14 @@ export default function App() {
               <div className="bg-white rounded-3xl border border-slate-100 p-6 space-y-6 text-left" id="tab-equities-list">
                 <div className="flex justify-between items-center border-b border-slate-50 pb-4">
                   <div>
-                    <h3 className="font-extrabold text-slate-800 text-base">Portfel Giełdowy (NYSE i GPW Warszawa)</h3>
-                    <p className="text-xs text-slate-400">Wybiórcze inwestycje w bezpieczne spółki technologiczne oraz dywidendowe giełdy polskiej</p>
+                    <h3 className="font-extrabold text-slate-800 text-base flex items-center gap-2">
+                      Portfel Giełdowy (NYSE i GPW Warszawa)
+                      <span className="inline-flex items-center gap-1 bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded-full text-[10px] font-extrabold">
+                        <span className="h-2 w-2 rounded-full bg-indigo-600 animate-pulse inline-block"></span>
+                        Live Auto-Sync (5m)
+                      </span>
+                    </h3>
+                    <p className="text-xs text-slate-400">Ceny pobierane równolegle w tle z Yahoo Finance (NYSE) oraz Stooq (GPW). Twoja wartość netto aktualizuje się automatycznie.</p>
                   </div>
                   
                   <div className="flex gap-2">

@@ -156,6 +156,57 @@ app.get("/api/rates", async (req, res) => {
 // ------------------------------------------------------------------
 // API ENDPOINT 4: Stock Quotes Aggregator (Stooq + Yahoo Finance Proxy)
 // ------------------------------------------------------------------
+app.get("/api/stock/:ticker", async (req, res) => {
+  const ticker = req.params.ticker.trim().toUpperCase();
+  if (!ticker) {
+    return res.status(400).json({ error: "Ticker parameter is required" });
+  }
+
+  try {
+    const yfUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}`;
+    const response = await fetch(yfUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      }
+    });
+
+    if (response.ok) {
+      const resultJson: any = await response.json();
+      const meta = resultJson?.chart?.result?.[0]?.meta;
+      
+      if (!meta) {
+        return res.status(404).json({ error: `No quote data found for ticker: ${ticker}` });
+      }
+
+      const regularMarketPrice = meta.regularMarketPrice;
+      const currency = meta.currency || "USD";
+      const previousClose = meta.chartPreviousClose || meta.previousClose;
+      
+      const changePercent = previousClose 
+        ? parseFloat(((regularMarketPrice - previousClose) / previousClose * 100).toFixed(2))
+        : 0;
+      
+      const longName = meta.longName || "";
+      const shortName = meta.shortName || "";
+      const name = longName || shortName || ticker;
+
+      return res.json({
+        symbol: ticker,
+        name,
+        currentPrice: regularMarketPrice ? parseFloat(regularMarketPrice.toFixed(2)) : null,
+        currency,
+        changePercent,
+        source: "Yahoo Finance"
+      });
+    } else {
+      return res.status(response.status).json({ error: `Yahoo Finance API responded with status ${response.status}` });
+    }
+  } catch (err: any) {
+    console.error(`Error querying Yahoo Finance for ${ticker}:`, err);
+    return res.status(500).json({ error: "Failed to fetch stock from Yahoo Finance", details: err.message });
+  }
+});
+
 app.post("/api/quotes", async (req, res) => {
   const { tickers } = req.body; // array of objects: { symbol: string, exchange: "NYSE" | "WSE" }
   if (!tickers || !Array.isArray(tickers)) {
