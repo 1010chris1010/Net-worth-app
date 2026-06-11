@@ -51,6 +51,8 @@ export default function App() {
 
   const [loadingQuotes, setLoadingQuotes] = useState<boolean>(false);
   const [quoteSuccessMsg, setQuoteSuccessMsg] = useState<string>("");
+  const [fetchingStockPrice, setFetchingStockPrice] = useState<boolean>(false);
+  const [fetchStockError, setFetchStockError] = useState<string>("");
 
   // Modals / Input Drawer Panels
   const [activeTab, setActiveTab] = useState<string>("summary"); // summary, cash, equities, funds, other, sync
@@ -86,8 +88,10 @@ export default function App() {
   useEffect(() => {
     try {
       const stored = localStorage.getItem("fortuna_vault_portfolio");
+      let loadedPortfolio = INITIAL_DEMO_PORTFOLIO;
       if (stored) {
-        setPortfolio(JSON.parse(stored));
+        loadedPortfolio = JSON.parse(stored);
+        setPortfolio(loadedPortfolio);
       }
       
       const storedRole = localStorage.getItem("fortuna_vault_role_master");
@@ -98,6 +102,13 @@ export default function App() {
       const storedBaseCurr = localStorage.getItem("fortuna_vault_base_currency");
       if (storedBaseCurr) {
         setBaseCurrency(storedBaseCurr);
+      }
+
+      // Check if there are stocks, and trigger background update of those stock prices
+      if (loadedPortfolio && loadedPortfolio.stocks && loadedPortfolio.stocks.length > 0) {
+        setTimeout(() => {
+          triggerBackgroundQuotesUpdate(loadedPortfolio.stocks);
+        }, 1200);
       }
     } catch (e) {
       console.error("Local storage lookup failed:", e);
@@ -250,6 +261,97 @@ export default function App() {
     } finally {
       setLoadingQuotes(false);
       setTimeout(() => setQuoteSuccessMsg(""), 6000);
+    }
+  };
+
+  const triggerBackgroundQuotesUpdate = async (stocksList: StockAsset[]) => {
+    if (!stocksList || stocksList.length === 0) return;
+    try {
+      const response = await fetch("/api/quotes", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          tickers: stocksList.map(s => ({
+            symbol: s.symbol,
+            exchange: s.exchange,
+            currentPrice: s.currentPrice
+          }))
+        }),
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        if (data && data.updated) {
+          setPortfolio(prev => {
+            const updatedStocks = prev.stocks.map(currentStock => {
+              const foundUpdate = data.updated.find(
+                (u: any) => u.symbol === currentStock.symbol && u.exchange === currentStock.exchange
+              );
+              if (foundUpdate) {
+                return { ...currentStock, currentPrice: foundUpdate.currentPrice };
+              }
+              return currentStock;
+            });
+            const updatedPortfolio = {
+              ...prev,
+              stocks: updatedStocks,
+              lastUpdate: new Date().toISOString()
+            };
+            // save to localStorage
+            localStorage.setItem("fortuna_vault_portfolio", JSON.stringify(updatedPortfolio));
+            return updatedPortfolio;
+          });
+          console.log("Background stock prices synchronized successfully!");
+        }
+      }
+    } catch (err) {
+      console.warn("Background stock prices sync failed, using cached values:", err);
+    }
+  };
+
+  const fetchCurrentPriceForTicker = async (symbol: string, assetType: AssetType) => {
+    const cleanSymbol = symbol.trim().toUpperCase();
+    if (!cleanSymbol) return;
+
+    setFetchingStockPrice(true);
+    setFetchStockError("");
+
+    const exchange = assetType === AssetType.STOCK_NYSE ? "NYSE" : "WSE";
+
+    try {
+      const response = await fetch("/api/quotes", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          tickers: [{ symbol: cleanSymbol, exchange }]
+        }),
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        if (data && data.updated && data.updated.length > 0) {
+          const result = data.updated[0];
+          setStockPriceCurrent(result.currentPrice.toString());
+          
+          // Auto-populate the buy price with the current price if the buy price is empty/unset
+          setStockPriceBuy(prev => prev.trim() === "" ? result.currentPrice.toString() : prev);
+          
+          if (result.name) {
+            setStockName(result.name);
+          } else {
+            setStockName(cleanSymbol);
+          }
+        } else {
+          setFetchStockError("Nie odnaleziono waloru.");
+        }
+      } else {
+        setFetchStockError("Błąd pobierania wyceny.");
+      }
+    } catch (err) {
+      console.error(err);
+      setFetchStockError("Serwis giełdowy niedostępny.");
+    } finally {
+      setFetchingStockPrice(false);
     }
   };
 
@@ -1298,25 +1400,43 @@ export default function App() {
               {(newAssetType === AssetType.STOCK_NYSE || newAssetType === AssetType.STOCK_WSE) && (
                 <div className="space-y-3 animate-fadeIn">
                   <div className="grid grid-cols-2 gap-3">
-                    <div>
+                    <div className="flex flex-col">
                       <label className="block text-xs font-semibold text-slate-500 mb-1">Symbol giełdowy (Ticker)</label>
-                      <input
-                        type="text"
-                        required
-                        placeholder="np. AAPL lub PKO"
-                        value={stockSymbol}
-                        onChange={(e) => setStockSymbol(e.target.value)}
-                        className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-indigo-500"
-                      />
+                      <div className="flex gap-1.5">
+                        <input
+                          type="text"
+                          required
+                          placeholder="np. NVDA, AAPL lub PKO"
+                          value={stockSymbol}
+                          onChange={(e) => setStockSymbol(e.target.value)}
+                          onBlur={() => fetchCurrentPriceForTicker(stockSymbol, newAssetType)}
+                          className="flex-1 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-indigo-500 uppercase font-bold"
+                        />
+                        <button
+                          type="button"
+                          disabled={fetchingStockPrice || !stockSymbol.trim()}
+                          onClick={() => fetchCurrentPriceForTicker(stockSymbol, newAssetType)}
+                          className="px-3 bg-indigo-50 hover:bg-indigo-150 text-indigo-700 font-extrabold text-[11px] rounded-xl flex items-center justify-center border border-indigo-100 shrink-0 transition"
+                        >
+                          {fetchingStockPrice ? (
+                            <RefreshCw className="w-3.5 h-3.5 animate-spin text-indigo-600" />
+                          ) : (
+                            "Pobierz"
+                          )}
+                        </button>
+                      </div>
+                      {fetchStockError && (
+                        <span className="text-[10px] text-rose-500 mt-1 font-semibold">{fetchStockError}</span>
+                      )}
                     </div>
                     <div>
                       <label className="block text-xs font-semibold text-slate-500 mb-1">Nazwa firmy</label>
                       <input
                         type="text"
-                        placeholder="np. Apple Inc."
+                        placeholder="np. NVIDIA Corp"
                         value={stockName}
                         onChange={(e) => setStockName(e.target.value)}
-                        className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm focus:outline-none"
+                        className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-indigo-500"
                       />
                     </div>
                   </div>
@@ -1331,7 +1451,7 @@ export default function App() {
                         placeholder="np. 12"
                         value={stockQty}
                         onChange={(e) => setStockQty(e.target.value)}
-                        className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm focus:outline-none"
+                        className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-indigo-500"
                       />
                     </div>
                     <div>
@@ -1343,19 +1463,32 @@ export default function App() {
                         placeholder="np. 175.50"
                         value={stockPriceBuy}
                         onChange={(e) => setStockPriceBuy(e.target.value)}
-                        className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm focus:outline-none"
+                        className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-indigo-500"
                       />
                     </div>
                     <div>
-                      <label className="block text-xs font-semibold text-slate-500 mb-1">Cena obecna (Opcjonalne)</label>
-                      <input
-                        type="number"
-                        step="0.01"
-                        placeholder="np. 224.30"
-                        value={stockPriceCurrent}
-                        onChange={(e) => setStockPriceCurrent(e.target.value)}
-                        className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm focus:outline-none"
-                      />
+                      <label className="block text-xs font-semibold text-slate-500 mb-1">Cena obecna ({newAssetType === AssetType.STOCK_NYSE ? "USD" : "PLN"})</label>
+                      <div className="relative">
+                        <input
+                          type="number"
+                          step="0.01"
+                          placeholder="Auto..."
+                          value={stockPriceCurrent}
+                          onChange={(e) => setStockPriceCurrent(e.target.value)}
+                          className={`w-full bg-slate-50 border rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-indigo-500 ${
+                            fetchingStockPrice ? "border-indigo-400 bg-indigo-50/20 text-indigo-700 font-bold" : "border-slate-200"
+                          }`}
+                        />
+                        {fetchingStockPrice && (
+                          <div className="absolute right-3 top-2.5">
+                            <span className="flex h-2 w-2 relative">
+                              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-75"></span>
+                              <span className="relative inline-flex rounded-full h-2 w-2 bg-indigo-500"></span>
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                      <span className="text-[10px] text-slate-400 mt-1 block font-medium">Zaciągana automatycznie</span>
                     </div>
                   </div>
                 </div>

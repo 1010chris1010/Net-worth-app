@@ -170,6 +170,29 @@ app.post("/api/quotes", async (req, res) => {
 
     let price = t.currentPrice || 100.0;
     let source = "cached";
+    let name = t.name || "";
+
+    const polishCommonNames: { [key: string]: string } = {
+      PKO: "PKO Bank Polski SA",
+      KGH: "KGHM Polska Miedź SA",
+      PKN: "ORLEN SA",
+      ALR: "Alior Bank SA",
+      CDR: "CD Projekt SA",
+      PEO: "Pekao SA",
+      PZU: "PZU SA",
+      LPP: "LPP SA",
+      DNP: "Dino Polska SA",
+      SPL: "Santander Bank Polska SA",
+      JSW: "Jastrzębska Spółka Węglowa SA",
+      PGE: "PGE SA",
+      ACP: "Asseco Poland SA",
+      MBK: "mBank SA",
+      CPS: "Cyfrowy Polsat SA",
+    };
+
+    if (exchange === "WSE" && !name && polishCommonNames[symbol]) {
+      name = polishCommonNames[symbol];
+    }
 
     if (exchange === "NYSE") {
       try {
@@ -186,6 +209,13 @@ app.post("/api/quotes", async (req, res) => {
           if (regularPrice && typeof regularPrice === "number") {
             price = regularPrice;
             source = "Yahoo Finance";
+          }
+          const longName = resultJson?.chart?.result?.[0]?.meta?.longName;
+          const shortName = resultJson?.chart?.result?.[0]?.meta?.shortName;
+          if (longName) {
+            name = longName;
+          } else if (shortName) {
+            name = shortName;
           }
         }
       } catch (err) {
@@ -234,6 +264,7 @@ app.post("/api/quotes", async (req, res) => {
       exchange,
       currentPrice: parseFloat(price.toFixed(2)),
       source,
+      name: name || symbol
     });
   }
 
